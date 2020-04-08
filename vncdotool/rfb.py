@@ -13,9 +13,15 @@ MIT License
 """
 # flake8: noqa
 
+import os
 import sys
 import math
 import zlib
+import binascii
+import hashlib
+
+from Crypto.Cipher import AES
+
 from struct import pack, unpack
 from . import pyDes
 from twisted.python import usage, log
@@ -116,6 +122,30 @@ KEY_BackSlash = 0x005C
 KEY_SpaceBar=   0x0020
 
 
+def long_to_bytes (val, endianness='big'):
+    """
+    Use :ref:`string formatting` and :func:`~binascii.unhexlify` to
+    convert ``val``, a :func:`long`, to a byte :func:`str`.
+    :param long val: The value to pack
+    :param str endianness: The endianness of the result. ``'big'`` for
+      big-endian, ``'little'`` for little-endian.
+    If you want byte- and word-ordering to differ, you're on your own.
+    Using :ref:`string formatting` lets us use Python's C innards.
+    """
+    # one (1) hex digit per four (4) bits
+    width = val.bit_length()
+    # unhexlify wants an even multiple of eight (8) bits, but we don't
+    # want more digits than we need (hence the ternary-ish 'or')
+    width += 8 - ((width % 8) or 8)
+    # format width specifier: four (4) bits per hex digit
+    fmt = '%%0%dx' % (width // 4)
+    # prepend zero (0) to the width, to zero-pad the output
+    s = binascii.unhexlify(fmt % val)
+    if endianness == 'little':
+        # see http://stackoverflow.com/a/931095/309233
+        s = s[::-1]
+    return s
+
 # ZRLE helpers
 def _zrle_next_bit(it, pixels_in_tile):
     num_pixels = 0
@@ -215,7 +245,7 @@ class RFBClient(Protocol):
 
     def _handleSecurityTypes(self, block):
         types = unpack("!%dB" % len(block), block)
-        SUPPORTED_TYPES = (1, 2)
+        SUPPORTED_TYPES = (1, 2, 30)
         valid_types = [sec_type for sec_type in types if sec_type in SUPPORTED_TYPES]
         if valid_types:
             sec_type = max(valid_types)
@@ -225,10 +255,41 @@ class RFBClient(Protocol):
                     self._doClientInitialization()
                 else:
                     self.expect(self._handleVNCAuthResult, 4)
+            elif sec_type == 30:
+                self.expect(self._handleARDAuth, 4)
             else:
                 self.expect(self._handleVNCAuth, 16)
         else:
             log.msg("unknown security types: %s" % repr(types))
+
+    def _handleARDAuth(self, block):
+        (gen, keylen) = unpack("!H H", block)
+
+        def processTokens(tokensBlock):
+            modulus = int(binascii.hexlify(tokensBlock[:keylen]), 16)
+            pubkey = int(binascii.hexlify(tokensBlock[keylen:]), 16)
+
+            secr = int(binascii.hexlify(os.urandom(512)), 16)
+
+            ourkey = pow(gen, secr, modulus)
+            shared = pow(pubkey, secr, modulus)
+
+            sharedhash = hashlib.md5(long_to_bytes(shared))
+            cipher = AES.new(sharedhash.digest(), AES.MODE_ECB)
+
+            username = self.factory.username
+            passwword = self.factory.password
+            blob = username + '\0' * (64 - len(username)) + passwword + '\0' * (64 - len(passwword))
+            ciphertext = cipher.encrypt(blob)
+
+            self.transport.write(ciphertext)
+            self.transport.write(long_to_bytes(ourkey))
+
+            self.expect(self._handleVNCAuthResult, 4)
+
+
+        self.expect(processTokens, keylen * 2)
+
 
     def _handleAuth(self, block):
         (auth,) = unpack("!I", block)

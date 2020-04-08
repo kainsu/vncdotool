@@ -249,6 +249,9 @@ def build_proxy(options):
 def add_standard_options(parser):
     parser.disable_interspersed_args()
 
+    parser.add_option('-u', '--username', action='store', metavar='USERNAME',
+        help='username for ARD authentication sheme')
+
     parser.add_option('-p', '--password', action='store', metavar='PASSWORD',
         help='use password to access server')
 
@@ -412,6 +415,7 @@ def vncdo():
     log.info('connecting to %s:%s', options.host, options.port)
 
     factory = build_tool(options, args)
+    factory.username = options.username
     factory.password = options.password
 
     if options.localcursor:
